@@ -203,7 +203,10 @@ class Agent extends EventEmitter {
 		if (busyLength < this.maxSessions && !item.completed) {
 			item.completed = true;
 
-			item();
+			item.initializing = false
+			item().finally(() => {
+				item.initializing = true
+			});
 		}
 	}
 
@@ -287,16 +290,18 @@ class Agent extends EventEmitter {
 			};
 
 			// The main logic is here
-			const entry = () => {
+			const entry = async () => {
 				const name = `${normalizedOrigin}:${normalizedOptions}`;
 				let receivedSettings = false;
 				let servername;
+				let socket
 
 				try {
 					const tlsSessionCache = this.tlsSessionCache.get(name);
+					socket = await this.createConnection(origin, options)
 
 					const session = http2.connect(origin, {
-						createConnection: this.createConnection,
+						createConnection: (...args) => socket,
 						settings: this.settings,
 						session: tlsSessionCache ? tlsSessionCache.session : undefined,
 						...options
@@ -354,7 +359,7 @@ class Agent extends EventEmitter {
 						this.tlsSessionCache.delete(name);
 					});
 
-					session.setTimeout(this.timeout, () => {
+					session.setTimeout(this.timeout || 0, () => {
 						// Terminates all streams owned by this session.
 						session.destroy();
 					});
@@ -416,6 +421,9 @@ class Agent extends EventEmitter {
 					// The Origin Set cannot shrink. No need to check if it suddenly became covered by another one.
 					session.once('origin', () => {
 						session[kOriginSet] = session.originSet;
+						if (session.socket.origin && !session[kOriginSet].includes(session.socket.origin)) {
+							session[kOriginSet].push(session.socket.origin);
+						}
 
 						if (!isFree()) {
 							// The session is full.
@@ -447,6 +455,9 @@ class Agent extends EventEmitter {
 						}
 
 						session[kOriginSet] = session.originSet;
+						if (session.socket.origin && !session[kOriginSet].includes(session.socket.origin)) {
+							session[kOriginSet].push(session.socket.origin);
+						}
 						this.emit('session', session);
 
 						if (freeSession()) {
@@ -467,7 +478,7 @@ class Agent extends EventEmitter {
 						removeFromQueue();
 
 						// Check if we haven't managed to execute all listeners.
-						if (listeners.length !== 0) {
+						if (listeners.length !== 0 && !entry.initializing) {
 							// Request for a new session with predefined listeners.
 							this.getSession(normalizedOrigin, options, listeners);
 							listeners.length = 0;
@@ -536,6 +547,9 @@ class Agent extends EventEmitter {
 						return stream;
 					};
 				} catch (error) {
+					if (socket) {
+						socket.destroy()
+					}
 					for (const listener of listeners) {
 						listener.reject(error);
 					}
